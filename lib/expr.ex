@@ -2918,7 +2918,11 @@ defmodule AshSql.Expr do
         """
     end
 
-    filter = Ash.Filter.move_to_relationship_path(expr, rest)
+    filter =
+      case Ash.Filter.move_to_relationship_path(expr, rest) do
+        %Ash.Filter{expression: expression} -> expression
+        expression -> expression
+      end
 
     filter =
       exists
@@ -2974,10 +2978,16 @@ defmodule AshSql.Expr do
         with target when not is_nil(target) <-
                Ash.Resource.Info.related(first_relationship.destination, prefix),
              [pk | _] <- Ash.Resource.Info.primary_key(target) do
+          pk_ref = %Ref{
+            attribute: Ash.Resource.Info.attribute(target, pk),
+            relationship_path: prefix,
+            resource: target
+          }
+
           Ash.Query.BooleanExpression.optimized_new(
             :and,
             filter,
-            Ash.Expr.expr(not is_nil(^Ash.Expr.ref(prefix, pk)))
+            %Ash.Query.Operator.IsNil{left: pk_ref, right: false}
           )
         else
           _ -> filter
