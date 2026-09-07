@@ -1607,7 +1607,46 @@ defmodule AshSql.Expr do
 
   defp default_dynamic_expr(
          query,
-         %StringLength{arguments: [value], embedded?: pred_embedded?},
+         %StringLength{arguments: [value]} = string_length,
+         bindings,
+         embedded?,
+         acc,
+         type
+       ) do
+    default_dynamic_expr(
+      query,
+      %{string_length | arguments: [value, :codepoints]},
+      bindings,
+      embedded?,
+      acc,
+      type
+    )
+  end
+
+  defp default_dynamic_expr(
+         query,
+         %StringLength{arguments: [value, :bytes], embedded?: pred_embedded?},
+         bindings,
+         embedded?,
+         acc,
+         type
+       ) do
+    do_dynamic_expr(
+      query,
+      %Fragment{
+        embedded?: pred_embedded?,
+        arguments: [raw: "octet_length(", expr: value, raw: ")"]
+      },
+      bindings,
+      embedded?,
+      acc,
+      type
+    )
+  end
+
+  defp default_dynamic_expr(
+         query,
+         %StringLength{arguments: [value, :codepoints], embedded?: pred_embedded?},
          bindings,
          embedded?,
          acc,
@@ -2885,7 +2924,11 @@ defmodule AshSql.Expr do
         """
     end
 
-    filter = Ash.Filter.move_to_relationship_path(expr, rest)
+    filter =
+      case Ash.Filter.move_to_relationship_path(expr, rest) do
+        %Ash.Filter{expression: expression} -> expression
+        expression -> expression
+      end
 
     filter =
       exists
@@ -2926,6 +2969,35 @@ defmodule AshSql.Expr do
           other ->
             other
         end)
+      end)
+
+    # Joins for `rest` are derived from the refs in the filter and are left
+    # joins, so a predicate with no refs (e.g. `exists(a.bs, true)`) drops the
+    # remaining path entirely, and a null-satisfiable predicate is satisfied
+    # by null-extended rows. Requiring a non-nil primary key at every hop
+    # (not just the last: `no_attributes?` hops join with `on: true`)
+    # excludes both while being a no-op for real rows.
+    filter =
+      rest
+      |> Enum.scan([], fn rel_name, prefix -> prefix ++ [rel_name] end)
+      |> Enum.reduce(filter, fn prefix, filter ->
+        with target when not is_nil(target) <-
+               Ash.Resource.Info.related(first_relationship.destination, prefix),
+             [pk | _] <- Ash.Resource.Info.primary_key(target) do
+          pk_ref = %Ref{
+            attribute: Ash.Resource.Info.attribute(target, pk),
+            relationship_path: prefix,
+            resource: target
+          }
+
+          Ash.Query.BooleanExpression.optimized_new(
+            :and,
+            filter,
+            %Ash.Query.Operator.IsNil{left: pk_ref, right: false}
+          )
+        else
+          _ -> filter
+        end
       end)
 
     query =

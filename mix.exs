@@ -10,7 +10,7 @@ defmodule AshSql.MixProject do
   Shared utilities for ecto-based sql data layers.
   """
 
-  @version "0.7.1"
+  @version "0.7.3"
 
   def project do
     [
@@ -80,7 +80,7 @@ defmodule AshSql.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:ash, ash_version("~> 3.32")},
+      {:ash, ash_version("~> 3.33")},
       {:ecto_sql, "~> 3.9"},
       {:ecto, "~> 3.13 and >= 3.13.4"},
       # dev/test dependencies
