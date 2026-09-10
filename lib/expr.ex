@@ -1607,7 +1607,46 @@ defmodule AshSql.Expr do
 
   defp default_dynamic_expr(
          query,
-         %StringLength{arguments: [value], embedded?: pred_embedded?},
+         %StringLength{arguments: [value]} = string_length,
+         bindings,
+         embedded?,
+         acc,
+         type
+       ) do
+    default_dynamic_expr(
+      query,
+      %{string_length | arguments: [value, :codepoints]},
+      bindings,
+      embedded?,
+      acc,
+      type
+    )
+  end
+
+  defp default_dynamic_expr(
+         query,
+         %StringLength{arguments: [value, :bytes], embedded?: pred_embedded?},
+         bindings,
+         embedded?,
+         acc,
+         type
+       ) do
+    do_dynamic_expr(
+      query,
+      %Fragment{
+        embedded?: pred_embedded?,
+        arguments: [raw: "octet_length(", expr: value, raw: ")"]
+      },
+      bindings,
+      embedded?,
+      acc,
+      type
+    )
+  end
+
+  defp default_dynamic_expr(
+         query,
+         %StringLength{arguments: [value, :codepoints], embedded?: pred_embedded?},
          bindings,
          embedded?,
          acc,
@@ -1662,7 +1701,7 @@ defmodule AshSql.Expr do
         arguments: [
           raw: "REGEXP_REPLACE(REGEXP_REPLACE(",
           expr: value,
-          raw: ", '\s+$', ''), '^\s+', '')"
+          raw: ", '\\s+$', ''), '^\\s+', '')"
         ]
       },
       bindings,
@@ -2157,7 +2196,11 @@ defmodule AshSql.Expr do
       )
 
     case Ash.Filter.hydrate_refs(
-           calculation.module.expression(calculation.opts, calculation.context),
+           Ash.Resource.Calculation.expression(
+             calculation.module,
+             calculation.opts,
+             calculation.context
+           ),
            %{
              resource: resource,
              aggregates: %{},
@@ -2208,7 +2251,7 @@ defmodule AshSql.Expr do
 
       {:error, error} ->
         raise """
-        Failed to hydrate references for resource #{inspect(resource)} in #{inspect(calculation.module.expression(calculation.opts, calculation.context))}
+        Failed to hydrate references for resource #{inspect(resource)} in #{inspect(Ash.Resource.Calculation.expression(calculation.module, calculation.opts, calculation.context))}
 
         #{inspect(error)}
         """
@@ -2881,7 +2924,11 @@ defmodule AshSql.Expr do
         """
     end
 
-    filter = Ash.Filter.move_to_relationship_path(expr, rest)
+    filter =
+      case Ash.Filter.move_to_relationship_path(expr, rest) do
+        %Ash.Filter{expression: expression} -> expression
+        expression -> expression
+      end
 
     filter =
       exists
@@ -2922,6 +2969,35 @@ defmodule AshSql.Expr do
           other ->
             other
         end)
+      end)
+
+    # Joins for `rest` are derived from the refs in the filter and are left
+    # joins, so a predicate with no refs (e.g. `exists(a.bs, true)`) drops the
+    # remaining path entirely, and a null-satisfiable predicate is satisfied
+    # by null-extended rows. Requiring a non-nil primary key at every hop
+    # (not just the last: `no_attributes?` hops join with `on: true`)
+    # excludes both while being a no-op for real rows.
+    filter =
+      rest
+      |> Enum.scan([], fn rel_name, prefix -> prefix ++ [rel_name] end)
+      |> Enum.reduce(filter, fn prefix, filter ->
+        with target when not is_nil(target) <-
+               Ash.Resource.Info.related(first_relationship.destination, prefix),
+             [pk | _] <- Ash.Resource.Info.primary_key(target) do
+          pk_ref = %Ref{
+            attribute: Ash.Resource.Info.attribute(target, pk),
+            relationship_path: prefix,
+            resource: target
+          }
+
+          Ash.Query.BooleanExpression.optimized_new(
+            :and,
+            filter,
+            %Ash.Query.Operator.IsNil{left: pk_ref, right: false}
+          )
+        else
+          _ -> filter
+        end
       end)
 
     query =
@@ -3558,9 +3634,14 @@ defmodule AshSql.Expr do
               end
             end
 
-          case Enum.find(Ash.Type.composite_types(type, constraints), condition) do
+          composite_types = Ash.Type.composite_types(type, constraints)
+
+          case Enum.find(composite_types, condition) do
             nil ->
-              {next, nil, nil}
+              raise Ash.Error.Query.InvalidExpression,
+                expression: next,
+                message:
+                  "Invalid path segment #{inspect(next)} for composite type #{inspect(type)}. Valid segments are: #{inspect(Enum.map(composite_types, &elem(&1, 0)))}"
 
             {_, aliased_as, type, constraints} ->
               {aliased_as, type, constraints}
@@ -3969,6 +4050,12 @@ defmodule AshSql.Expr do
          acc
        )
        when is_atom(field) do
+    unless to_string(field) =~ ~r/^[a-zA-Z_][a-zA-Z0-9_]*$/ do
+      raise Ash.Error.Query.InvalidExpression,
+        expression: field,
+        message: "#{inspect(field)} is not a valid composite type field name"
+    end
+
     type =
       parameterized_type(
         bindings.sql_behaviour,
@@ -4107,15 +4194,15 @@ defmodule AshSql.Expr do
   def do_split_statements(other, _op), do: [other]
 
   defp escape_contains(text) do
-    "%" <> String.replace(text, ~r/([\%_])/u, "\\\\\\0") <> "%"
+    "%" <> String.replace(text, ~r/([\\%_])/u, "\\\\\\0") <> "%"
   end
 
   defp escape_starts_with(text) do
-    String.replace(text, ~r/([\%_])/u, "\\\\\\0") <> "%"
+    String.replace(text, ~r/([\\%_])/u, "\\\\\\0") <> "%"
   end
 
   defp escape_ends_with(text) do
-    "%" <> String.replace(text, ~r/([\%_])/u, "\\\\\\0")
+    "%" <> String.replace(text, ~r/([\\%_])/u, "\\\\\\0")
   end
 
   defp determine_types(sql_behaviour, mod, args, returns) do
