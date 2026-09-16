@@ -108,8 +108,20 @@ defmodule AshSql.Expr do
     do_dynamic_expr(query, expression, bindings, embedded?, acc, type)
   end
 
+  # Anchors the legs `Ash.Actions.Read.add_calc_context_to_filter/8` does not reach, such as
+  # combination query legs.
   defp as_of_or_now(query) do
-    get_in(query.__ash_bindings__, [:context, :private, :as_of]) || DateTime.utc_now()
+    get_in(query.__ash_bindings__, [:context, :private, :as_of]) ||
+      now_in_extent(query.__ash_bindings__.resource)
+  end
+
+  # A temporal resource builds its periods from an inner type, and `now` has to match it.
+  # Anything else has no extent to answer in.
+  defp now_in_extent(resource) do
+    case Ash.Temporal.now_for(Ash.Resource.Info.temporal_inner_type(resource)) do
+      {:ok, now} -> now
+      :error -> DateTime.utc_now()
+    end
   end
 
   defp do_dynamic_expr(query, expr, bindings, embedded?, acc, type \\ nil) do
